@@ -10,4 +10,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV RELAY_PORT=7735
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7735"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${RELAY_PORT:-8080}"]

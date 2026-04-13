@@ -1,6 +1,9 @@
-# jarvis-notifications-relay
+# jarvis-relay
 
-Stateless Expo Push API proxy. Receives push notification requests from `jarvis-notifications`, validates household JWTs, applies rate limiting, and forwards to Expo's Push API for APNs/FCM delivery.
+Stateless cloud relay for Jarvis self-hosted installations. Two responsibilities:
+
+1. **Push notifications** — Receives push requests from `jarvis-notifications`, validates household JWTs, applies rate limiting, forwards to Expo Push API for APNs/FCM delivery.
+2. **OAuth bounce** — Receives OAuth provider callbacks (e.g., Google) at an HTTPS endpoint and 302-redirects to `jarvis://auth-complete` so the mobile app intercepts the auth code. No tokens are exchanged — just a URL redirect. This solves the self-hosted OAuth problem where providers require HTTPS redirect URIs.
 
 ## Architecture
 
@@ -8,10 +11,18 @@ Stateless Expo Push API proxy. Receives push notification requests from `jarvis-
 jarvis-notifications (self-hosted)
         │
         ▼  POST /v1/send (household JWT)
-jarvis-notifications-relay (cloud/local)
+jarvis-relay (cloud)
         │
         ▼  POST https://exp.host/--/api/v2/push/send
     Expo Push API → APNs / FCM → device
+
+Google OAuth (or any provider)
+        │
+        ▼  GET /oauth/bounce?code=xxx&state=yyy
+jarvis-relay (cloud)
+        │
+        ▼  302 → jarvis://auth-complete?code=xxx&state=yyy
+    Mobile app intercepts → exchanges code locally
 ```
 
 **Stateless** — no database, no persistent storage. All state (rate limits, abuse tracking) is in-memory and resets on restart.
@@ -37,6 +48,7 @@ docker run -p 8080:8080 --env-file .env jarvis-notifications-relay
 |--------|------|------|-------------|
 | GET | `/health` | None | Health check |
 | POST | `/v1/send` | Household JWT | Forward push notifications to Expo |
+| GET | `/oauth/bounce` | None | Redirect OAuth callback to mobile app custom scheme |
 
 ### POST /v1/send
 
@@ -54,6 +66,31 @@ docker run -p 8080:8080 --env-file .env jarvis-notifications-relay
   "priority": "high"
 }
 ```
+
+### GET /oauth/bounce
+
+**No auth required.** Public endpoint — just a 302 redirect.
+
+**Query params:**
+- `code` (required) — OAuth authorization code from provider
+- `state` (required) — Base64url-encoded JSON: `{"t": "<csrf_token>", "r": "<redirect_uri>"}`
+
+**Response:** `302` redirect to `<redirect_uri>?code=xxx&state=<csrf_token>`
+
+**State encoding:** The client app encodes both the CSRF token and its target redirect URI into the OAuth `state` parameter:
+```python
+import base64, json
+state = base64.urlsafe_b64encode(json.dumps({
+    "t": "random-csrf-token",
+    "r": "jarvis://auth-complete"
+}).encode()).decode().rstrip("=")
+```
+
+The relay decodes state, validates the redirect scheme (must be a custom scheme like `jarvis://`, not `http`/`https`), and 302-redirects with the code and original CSRF token.
+
+**Allowed schemes:** `jarvis`, `exp`, `myapp` (configurable in `_ALLOWED_SCHEMES`)
+
+**Usage:** Register `https://<relay-host>/oauth/bounce` as the redirect URI in your OAuth provider (e.g., Google Cloud Console). Any app can use the same endpoint — just encode its own callback URI in the state parameter.
 
 ## Rate Limiting (In-Memory)
 
@@ -74,7 +111,7 @@ docker run -p 8080:8080 --env-file .env jarvis-notifications-relay
 ## Testing
 
 ```bash
-.venv/bin/pytest -v           # 36 tests
+.venv/bin/pytest -v           # 49 tests
 .venv/bin/pytest --cov=app    # with coverage
 ```
 

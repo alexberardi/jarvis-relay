@@ -1,10 +1,13 @@
-"""Jarvis Notifications Relay — stateless Expo Push proxy."""
+"""Jarvis Relay — stateless Expo Push proxy + OAuth bounce."""
 
+import base64
+import json
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlencode, urlparse
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from app.alert_service import send_alert
@@ -53,7 +56,7 @@ async def lifespan(_app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="jarvis-notifications-relay", lifespan=lifespan)
+app = FastAPI(title="jarvis-relay", lifespan=lifespan)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -64,7 +67,78 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "jarvis-notifications-relay"}
+    return {"status": "ok", "service": "jarvis-relay"}
+
+
+# ---------------------------------------------------------------------------
+# OAuth bounce — redirects provider callback to mobile app custom scheme
+# ---------------------------------------------------------------------------
+
+# Schemes allowed for OAuth bounce redirect (prevent open redirect attacks)
+_ALLOWED_SCHEMES = {"jarvis", "exp", "myapp"}
+
+
+def decode_oauth_state(raw_state: str) -> tuple[str, str]:
+    """Decode a base64url-encoded OAuth state parameter.
+
+    Expected JSON format: {"t": "<csrf_token>", "r": "<redirect_uri>"}
+
+    Returns (csrf_token, redirect_uri).
+    Raises HTTPException on invalid format.
+    """
+    try:
+        # Add padding if needed
+        padded = raw_state + "=" * (-len(raw_state) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded))
+        csrf = payload["t"]
+        redirect_uri = payload["r"]
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid state parameter: expected base64url JSON with 't' and 'r' keys",
+        ) from exc
+
+    # Validate redirect scheme
+    parsed = urlparse(redirect_uri)
+    if not parsed.scheme or parsed.scheme.lower() in ("http", "https"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Redirect URI must use a custom scheme, not '{parsed.scheme or 'empty'}'",
+        )
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Scheme '{parsed.scheme}' not in allowed list: {sorted(_ALLOWED_SCHEMES)}",
+        )
+
+    return csrf, redirect_uri
+
+
+@app.get("/oauth/bounce")
+async def oauth_bounce(
+    code: str = Query(...),
+    state: str = Query(...),
+):
+    """Bounce an OAuth callback to a client app's custom URI scheme.
+
+    Google (and other providers) require an HTTPS redirect URI. This endpoint
+    receives the callback, extracts the real redirect URI and CSRF token from
+    the base64url-encoded state, then 302-redirects to the app's custom scheme.
+
+    State format: base64url({"t": "<csrf_token>", "r": "<redirect_uri>"})
+
+    No tokens are exchanged — just the auth code is forwarded. The client app
+    handles the token exchange locally.
+    """
+    csrf_token, redirect_uri = decode_oauth_state(state)
+    params = urlencode({"code": code, "state": csrf_token})
+
+    # Append params to redirect URI (handle existing query string)
+    separator = "&" if "?" in redirect_uri else "?"
+    target = f"{redirect_uri}{separator}{params}"
+
+    logger.info("OAuth bounce: %s → %s (csrf=%s…)", urlparse(redirect_uri).scheme, urlparse(redirect_uri).netloc or urlparse(redirect_uri).path, csrf_token[:8])
+    return RedirectResponse(url=target, status_code=302)
 
 
 # ---------------------------------------------------------------------------
