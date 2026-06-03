@@ -47,8 +47,25 @@ docker run -p 8080:8080 --env-file .env jarvis-notifications-relay
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/health` | None | Health check |
+| POST | `/v1/register` | None | Mint a household JWT for a self-hosted install (rate-limited per IP) |
 | POST | `/v1/send` | Household JWT | Forward push notifications to Expo |
 | GET | `/oauth/bounce` | None | Redirect OAuth callback to mobile app custom scheme |
+
+### POST /v1/register
+
+**No auth required.** Open endpoint so self-hosted `jarvis-notifications` can bootstrap without operator intervention. Per-IP rate-limited (default 20/hr).
+
+**Body:**
+```json
+{ "household_id": "<uuid>" }
+```
+
+**Response:**
+```json
+{ "household_id": "<uuid>", "jwt": "<eyJ...>", "expires_at": <unix_seconds> }
+```
+
+The returned JWT is HS256-signed with `RELAY_JWT_SECRET` and contains `{household_id, exp}`. Default TTL is 10 years (`HOUSEHOLD_JWT_TTL_SECONDS`). The relay has no central registry — callers self-attest their `household_id` (typically a UUID from `jarvis-auth`). UUID collisions are negligible, and Expo push tokens are device-specific so a guessed household_id confers no useful attack surface.
 
 ### POST /v1/send
 

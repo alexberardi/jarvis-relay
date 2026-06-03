@@ -17,6 +17,8 @@ def _test_settings() -> Settings:
         RATE_LIMIT_PER_HOUSEHOLD_PER_HOUR=100,
         RATE_LIMIT_PER_TOKEN_PER_HOUR=20,
         RATE_LIMIT_BURST_PER_SECOND=10,
+        RATE_LIMIT_REGISTER_PER_IP_PER_HOUR=20,
+        HOUSEHOLD_JWT_TTL_SECONDS=315_360_000,
         ALERT_WEBHOOK_URL=None,
         CONSECUTIVE_429_ALERT_THRESHOLD=3,
         CONSECUTIVE_429_SUSPEND_THRESHOLD=10,
@@ -32,7 +34,8 @@ def override_settings():
         with patch("app.rate_limiter.get_settings", return_value=_test_settings()):
             with patch("app.expo_client.get_settings", return_value=_test_settings()):
                 with patch("app.alert_service.get_settings", return_value=_test_settings()):
-                    yield
+                    with patch("app.main.get_settings", return_value=_test_settings()):
+                        yield
     app.dependency_overrides.clear()
 
 
@@ -43,11 +46,13 @@ def reset_rate_limiter():
     rate_limiter._token_buckets.clear()
     rate_limiter._burst_buckets.clear()
     rate_limiter._household_state.clear()
+    rate_limiter._ip_register_buckets.clear()
     yield
     rate_limiter._household_buckets.clear()
     rate_limiter._token_buckets.clear()
     rate_limiter._burst_buckets.clear()
     rate_limiter._household_state.clear()
+    rate_limiter._ip_register_buckets.clear()
 
 
 @pytest.fixture

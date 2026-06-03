@@ -44,6 +44,7 @@ class RateLimiter:
         self._token_buckets: dict[str, RateBucket] = {}
         self._burst_buckets: dict[str, RateBucket] = {}
         self._household_state: dict[str, HouseholdRateState] = {}
+        self._ip_register_buckets: dict[str, RateBucket] = {}
 
     def _get_state(self, household_id: str) -> HouseholdRateState:
         if household_id not in self._household_state:
@@ -130,6 +131,21 @@ class RateLimiter:
     def get_tokens_over_limit(self, tokens: list[str]) -> list[str]:
         """Return tokens that are over their per-token rate limit."""
         return [t for t in tokens if not self.check_token_limit(t)]
+
+    def check_register_limit(self, ip: str) -> bool:
+        """Check per-IP rate limit for /v1/register. Returns True if allowed."""
+        settings = get_settings()
+        if ip not in self._ip_register_buckets:
+            self._ip_register_buckets[ip] = RateBucket()
+        bucket = self._ip_register_buckets[ip]
+        count = bucket.count_in_window(3600)
+        return count + 1 <= settings.rate_limit_register_per_ip_per_hour
+
+    def record_register(self, ip: str) -> None:
+        """Record a successful /v1/register call for the given IP."""
+        if ip not in self._ip_register_buckets:
+            self._ip_register_buckets[ip] = RateBucket()
+        self._ip_register_buckets[ip].add()
 
 
 # Module-level singleton
