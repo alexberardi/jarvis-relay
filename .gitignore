@@ -10,6 +10,9 @@ __pycache__/
 .vscode/
 *.swp
 
+# Packaging
+*.egg-info/
+
 # Docker
 .docker/
 
