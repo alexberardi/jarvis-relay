@@ -160,11 +160,25 @@ async def oauth_bounce(
 # ---------------------------------------------------------------------------
 
 def _client_ip(request: Request) -> str:
-    """Best-effort caller IP. Prefer X-Forwarded-For (Fly.io / proxy) over
-    the raw socket. We only use this for per-IP rate limiting, not auth."""
+    """Best-effort caller IP for per-IP rate limiting (not auth).
+
+    Behind Fly.io the authoritative client IP is the ``Fly-Client-IP`` header,
+    set by Fly's edge from the real connection — a caller cannot forge it. Fall
+    back to the RIGHT-MOST ``X-Forwarded-For`` entry: proxies append the address
+    they received the connection from, so the right-most hop is the one added by
+    our trusted proxy. Never trust the LEFT-MOST entry — it is fully
+    caller-controlled, so keying the limiter off it lets a single client mint a
+    fresh bucket per request and flood us into an OOM. Socket peer is the last
+    resort for direct/local connections.
+    """
+    fly_ip = request.headers.get("fly-client-ip")
+    if fly_ip and fly_ip.strip():
+        return fly_ip.strip()
     xff = request.headers.get("x-forwarded-for")
     if xff:
-        return xff.split(",")[0].strip()
+        hops = [p.strip() for p in xff.split(",") if p.strip()]
+        if hops:
+            return hops[-1]
     return request.client.host if request.client else "unknown"
 
 
