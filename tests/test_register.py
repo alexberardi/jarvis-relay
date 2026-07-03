@@ -60,13 +60,17 @@ class TestRegisterEndpoint:
         assert resp.status_code == 429
         assert "register" in resp.json()["detail"].lower()
 
-    def test_register_uses_x_forwarded_for_when_present(self, client):
-        """X-Forwarded-For (Fly.io) takes priority over the raw socket IP."""
+    def _fill(self, ip: str) -> None:
         from app.rate_limiter import RateBucket, rate_limiter
 
-        rate_limiter._ip_register_buckets["10.1.2.3"] = RateBucket()
+        rate_limiter._ip_register_buckets[ip] = RateBucket()
         for _ in range(20):
-            rate_limiter._ip_register_buckets["10.1.2.3"].add()
+            rate_limiter._ip_register_buckets[ip].add()
+
+    def test_register_uses_rightmost_xff_hop(self, client):
+        """The limiter keys off the RIGHT-most XFF hop (the trusted proxy's
+        view of the client), so filling that bucket blocks the caller."""
+        self._fill("172.16.0.1")  # right-most hop
 
         resp = client.post(
             "/v1/register",
@@ -74,3 +78,39 @@ class TestRegisterEndpoint:
             headers={"X-Forwarded-For": "10.1.2.3, 172.16.0.1"},
         )
         assert resp.status_code == 429
+
+    def test_register_ignores_spoofable_leftmost_xff(self, client):
+        """Filling the LEFT-most (caller-controlled) XFF entry must NOT throttle:
+        keying off it would let a single client mint a fresh bucket per request."""
+        self._fill("10.1.2.3")  # left-most, attacker-chosen
+
+        resp = client.post(
+            "/v1/register",
+            json={"household_id": "hh-x"},
+            headers={"X-Forwarded-For": "10.1.2.3, 172.16.0.1"},
+        )
+        assert resp.status_code == 200
+
+    def test_register_prefers_fly_client_ip(self, client):
+        """Fly-Client-IP is authoritative and can't be forged; a spoofed XFF is
+        ignored when it's present."""
+        self._fill("9.9.9.9")
+
+        resp = client.post(
+            "/v1/register",
+            json={"household_id": "hh-x"},
+            headers={
+                "Fly-Client-IP": "9.9.9.9",
+                "X-Forwarded-For": "1.1.1.1, 2.2.2.2",  # spoof attempt
+            },
+        )
+        assert resp.status_code == 429
+
+    def test_register_jwt_ttl_default_is_bounded(self):
+        """The minting TTL default must be short (not the old 10 years) — the
+        client transparently re-registers, so a long TTL only widens leak risk."""
+        from app.config import Settings
+
+        s = Settings(RELAY_JWT_SECRET="x", _env_file=None)
+        assert s.household_jwt_ttl_seconds <= 31 * 24 * 3600
+        assert s.household_jwt_ttl_seconds >= 24 * 3600
